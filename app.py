@@ -1,47 +1,52 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_file
 from PIL import Image, ImageOps
 import ezdxf
 import os
 
 app = Flask(__name__)
 
+# Créer un dossier pour les téléchargements si nécessaire
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 @app.route('/')
 def home():
+    """Page d'accueil."""
     return render_template('index.html')
 
 def hex_to_rgb(hex_color):
     """Convertit une couleur hexadécimale (#RRGGBB) en tuple RGB."""
-    if not hex_color.startswith("#") or len(hex_color) != 7:
-        raise ValueError("Couleur hexadécimale invalide.")
-    hex_color = hex_color.lstrip('#')
-    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    try:
+        hex_color = hex_color.lstrip('#')
+        return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        raise ValueError(f"Couleur hexadécimale invalide : {hex_color}")
 
 def image_to_dxf(input_file, output_file, color_to_remove):
+    """Convertit une image PNG en fichier DXF après suppression d'une couleur."""
     try:
-        img = Image.open(input_file).convert("RGB")  # Charger l'image en mode RGB
+        # Charger l'image
+        img = Image.open(input_file).convert("RGB")
         pixels = img.load()
         width, height = img.size
 
-        # Supprimer la couleur spécifiée en la rendant blanche
+        # Remplacer la couleur spécifiée par blanc
         for y in range(height):
             for x in range(width):
                 if pixels[x, y] == color_to_remove:
-                    pixels[x, y] = (255, 255, 255)  # Remplacer par blanc
+                    pixels[x, y] = (255, 255, 255)
 
-        # Convertir l'image en mode binaire (noir et blanc)
-        img = img.convert("L")  # Convertir en niveaux de gris
-        img = img.point(lambda x: 0 if x < 128 else 255, '1')  # Binariser
+        # Convertir l'image en noir et blanc
+        img = img.convert("L")  # Niveaux de gris
+        img = img.point(lambda x: 0 if x < 128 else 255, '1')  # Binarisation
 
-        # Inverser l'image pour que les parties noires soient converties
+        # Inverser pour correspondre au format DXF
         img = ImageOps.invert(img.convert("L")).convert("1")
+        pixels = img.load()
 
-        # Créer le fichier DXF
+        # Création du fichier DXF
         doc = ezdxf.new()
         msp = doc.modelspace()
-        pixels = img.load()
 
         for y in range(height):
             for x in range(width):
@@ -57,42 +62,40 @@ def image_to_dxf(input_file, output_file, color_to_remove):
         doc.saveas(output_file)
         return output_file
     except Exception as e:
-        return str(e)
+        raise RuntimeError(f"Erreur lors de la conversion : {str(e)}")
 
 @app.route('/convert', methods=['POST'])
 def convert():
+    """Route pour convertir une image en DXF."""
     if 'file' not in request.files or 'color' not in request.form:
-        return jsonify({"error": "Fichier ou couleur manquant"})
-    
-    file = request.files['file']
-    hex_color = request.form['color']  # Par exemple, "#ffffff"
-    
-    if file.filename == '':
-        return jsonify({"error": "Aucun fichier sélectionné"})
-    
-    try:
-        rgb_color = hex_to_rgb(hex_color)  # Convertit en (255, 255, 255)
-    except ValueError as e:
-        return jsonify({"error": f"Couleur invalide : {hex_color}. Erreur : {str(e)}"})
+        return jsonify({"error": "Fichier ou couleur manquant"}), 400
 
-    # Crée les chemins pour les fichiers
+    file = request.files['file']
+    hex_color = request.form['color']  # Couleur au format #RRGGBB
+
+    if file.filename == '':
+        return jsonify({"error": "Aucun fichier sélectionné"}), 400
+
+    try:
+        rgb_color = hex_to_rgb(hex_color)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # Définir les chemins des fichiers
     input_path = os.path.join(UPLOAD_FOLDER, file.filename)
-    output_path = os.path.splitext(input_path)[0] + "_convertie.dxf"
-    
-    # Sauvegarde le fichier
+    output_path = os.path.splitext(input_path)[0] + "_converted.dxf"
+
+    # Sauvegarder le fichier téléchargé
     file.save(input_path)
 
-    # Appelle la fonction de conversion
-    result = image_to_dxf(input_path, output_path, rgb_color)
-    if os.path.exists(result):
-        return jsonify({"message": f"Fichier DXF généré : {result}"})
-    else:
-        return jsonify({"error": f"Erreur lors de la conversion : {result}"})
-    
+    # Convertir l'image
+    try:
+        dxf_path = image_to_dxf(input_path, output_path, rgb_color)
+        return send_file(dxf_path, as_attachment=True)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
-
-port = int(os.environ.get("PORT", 5001))
-app.run(host="0.0.0.0", port=port)
-
+    # Récupérer le port défini par Render ou utiliser 5000 par défaut
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
